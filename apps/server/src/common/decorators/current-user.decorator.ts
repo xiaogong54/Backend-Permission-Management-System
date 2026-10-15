@@ -1,6 +1,6 @@
 import { createParamDecorator, type ExecutionContext } from '@nestjs/common';
 import type { Request } from 'express';
-import type { JwtPayload } from '../../modules/auth/auth.service';
+import type { JwtPayload } from '../types/auth';
 
 /**
  * 注入当前登录人

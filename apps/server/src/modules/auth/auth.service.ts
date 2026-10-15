@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { LogType, RoleCode, WILDCARD_PERMISSION } from '@mall-admin/shared';
+import { LogType } from '@mall-admin/shared';
 import bcrypt from 'bcryptjs';
 import { randomUUID } from 'node:crypto';
 import { create as createSvgCaptcha } from 'svg-captcha';
@@ -8,8 +8,14 @@ import { CacheService } from '../../common/cache/cache.service';
 import { AUTH_CACHE } from '../../common/constants/cache-keys';
 import { ErrorCode } from '../../common/constants/error-code';
 import { BizException } from '../../common/exceptions/biz.exception';
+import { PermissionService } from '../../common/permission/permission.service';
+import type { JwtPayload } from '../../common/types/auth';
 import { PrismaService } from '../../prisma/prisma.service';
 import type { LoginDto } from './dto/login.dto';
+
+// 重新导出 JwtPayload：控制器等调用方一直从本文件 import 这个类型，
+// 保持导出可以避免大面积改动。真正的定义已下沉到 common/types/auth.ts。
+export type { JwtPayload };
 
 /** 验证码有效期（秒）。太短用户来不及输，太长给暴力破解留窗口 */
 const CAPTCHA_TTL_SECONDS = 120;
@@ -29,25 +35,6 @@ export interface CaptchaVo {
   svg: string;
   /** 有效期（秒） */
   expiresIn: number;
-}
-
-/**
- * JWT 载荷
- *
- * jti / iat / exp 由 jsonwebtoken 自动写入，不需要我们手动填。
- * 但类型上必须声明，否则守卫与登出逻辑取不到它们。
- */
-export interface JwtPayload {
-  /** 管理员 id，按 JWT 规范是字符串 */
-  sub: string;
-  username: string;
-  roles: string[];
-  /** JWT ID —— 登出黑名单的抓手 */
-  jti?: string;
-  /** 签发时间（秒级时间戳） */
-  iat?: number;
-  /** 过期时间（秒级时间戳） */
-  exp?: number;
 }
 
 /** 登录成功返回给前端的数据 */
@@ -92,6 +79,7 @@ export class AuthService {
     private readonly cache: CacheService,
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
+    private readonly permissionService: PermissionService,
   ) {}
 
   // ==========================================================================
@@ -222,7 +210,7 @@ export class AuthService {
     }
 
     // ---- 4. 取角色与权限 ----
-    const { roles, permissions } = await this.loadRolesAndPermissions(admin.id);
+    const { roles, permissions } = await this.permissionService.load(admin.id);
 
     // ---- 5. 签发 JWT ----
     const payload: JwtPayload = {
@@ -311,7 +299,7 @@ export class AuthService {
     }
 
     // 角色可能刚被管理员改过，这里也用最新的，不用 token 里的快照
-    const { roles, permissions } = await this.loadRolesAndPermissions(admin.id);
+    const { roles, permissions } = await this.permissionService.load(admin.id);
 
     return {
       userInfo: {
@@ -371,36 +359,6 @@ export class AuthService {
   // ==========================================================================
   //  内部工具
   // ==========================================================================
-
-  /**
-   * 加载角色码与权限码
-   *
-   * 超级管理员返回通配符 '*'，而不是把几十条权限逐条查出来。
-   * 好处是后续新增权限点无需回头给超管补授权 ——
-   * 这规避了 RBAC 系统最经典的事故："加了新功能，超管反而没权限"。
-   */
-  private async loadRolesAndPermissions(
-    adminId: bigint,
-  ): Promise<{ roles: string[]; permissions: string[] }> {
-    const links = await this.prisma.sysAdminRole.findMany({
-      where: { adminId },
-      select: {
-        role: { select: { code: true, status: true, deletedAt: true } },
-      },
-    });
-
-    const roles = links
-      .map((l) => l.role)
-      .filter((r) => r.status === 1 && r.deletedAt === null)
-      .map((r) => r.code);
-
-    if (roles.includes(RoleCode.SUPER_ADMIN)) {
-      return { roles, permissions: [WILDCARD_PERMISSION] };
-    }
-
-    // 普通角色的权限码要等权限树实现后从 sys_role_permission 查出来
-    return { roles, permissions: [] };
-  }
 
   /**
    * 写登录 / 登出审计日志
