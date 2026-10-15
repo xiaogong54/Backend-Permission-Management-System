@@ -3,14 +3,12 @@
  * 登录页
  *
  * 对齐 docs/原型.html 的左右分栏：左侧品牌区 + 右侧表单。
- *
- * 【当前状态】后端 auth 模块尚未实现，调用 /auth/login 会返回 404。
- * 表单校验、错误抖动、验证码刷新这些交互已经就位，
- * 等 auth 模块做完，把 login() 里的 TODO 换成真实请求即可。
+ * 验证码与登录都走真实接口（apps/server 的 auth 模块）。
  */
 import { onMounted, reactive, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus';
+import { getCaptcha } from '@/api/modules/auth';
 import { useUserStore } from '@/store/modules/user';
 
 const router = useRouter();
@@ -20,6 +18,12 @@ const userStore = useUserStore();
 const formRef = ref<FormInstance>();
 const submitting = ref(false);
 const shaking = ref(false);
+const captchaLoading = ref(false);
+
+/** 验证码标识：登录时要和后端下发的 captchaId 一起提交 */
+const captchaId = ref('');
+/** 验证码 SVG 内容 */
+const captchaSvg = ref('');
 
 const form = reactive({
   username: '',
@@ -31,15 +35,35 @@ const form = reactive({
 const rules: FormRules = {
   username: [{ required: true, message: '请输入账号', trigger: 'blur' }],
   password: [{ required: true, message: '请输入密码', trigger: 'blur' }],
-  captcha: [{ required: true, message: '请输入验证码', trigger: 'blur' }],
+  captcha: [
+    { required: true, message: '请输入验证码', trigger: 'blur' },
+    { len: 4, message: '验证码为 4 位字符', trigger: 'blur' },
+  ],
 };
 
-/** 验证码图片（后端 svg-captcha 返回的 SVG 字符串），auth 模块做完后接上 */
-const captchaSvg = ref('');
-
-function refreshCaptcha(): void {
-  // TODO(auth 模块): 调 GET /auth/captcha 拿 { captchaId, svg }
-  captchaSvg.value = '';
+/**
+ * 获取（或刷新）验证码
+ *
+ * SVG 直接来自后端 svg-captcha，页面里用 v-html 渲染。
+ * 安全性：这份 SVG 是**我们自己后端**生成的，不含任何用户输入，
+ * 所以不构成 XSS 面 —— 这也是模板里那行 eslint-disable 的原因。
+ */
+async function refreshCaptcha(): Promise<void> {
+  if (captchaLoading.value) return;
+  captchaLoading.value = true;
+  try {
+    const res = await getCaptcha();
+    captchaId.value = res.captchaId;
+    captchaSvg.value = res.svg;
+    // 换图之后清掉上一次输入，避免用户以为还是旧的那张
+    form.captcha = '';
+  } catch {
+    // 拦截器已经弹过提示了，这里只保证界面不卡在 loading
+    captchaId.value = '';
+    captchaSvg.value = '';
+  } finally {
+    captchaLoading.value = false;
+  }
 }
 
 function triggerShake(): void {
@@ -58,16 +82,52 @@ async function handleSubmit(): Promise<void> {
     return;
   }
 
+  if (!captchaId.value) {
+    ElMessage.warning('验证码已失效，请点击图片刷新');
+    await refreshCaptcha();
+    return;
+  }
+
   submitting.value = true;
   try {
-    // TODO(auth 模块): 换成真实请求
-    //   const res = await login({ username, password, captchaId, captcha })
-    //   userStore.setAuth(res)
-    await Promise.resolve();
-
-    ElMessage.warning(
-      '登录接口属于 auth 模块，尚未实现。请先在 .env.development 里开启 VITE_DEV_BYPASS_AUTH 浏览页面。',
+    await userStore.login(
+      {
+        username: form.username.trim(),
+        password: form.password,
+        captchaId: captchaId.value,
+        captcha: form.captcha.trim(),
+      },
+      form.remember,
     );
+
+    ElMessage.success(`欢迎回来，${userStore.nickname}`);
+
+    /**
+     * 跳回守卫记录的原页面
+     *
+     * ★ 必须排除 /login 自身：
+     *   如果 redirect 是 /login，跳过去又会立刻被守卫弹回，
+     *   表现为"登录成功后页面闪一下又回到登录页"。
+     */
+    const redirect = route.query.redirect;
+    const target =
+      typeof redirect === 'string' && redirect.startsWith('/') && !redirect.startsWith('/login')
+        ? redirect
+        : '/';
+
+    await router.replace(target);
+  } catch {
+    /**
+     * ★ 登录失败后必须刷新验证码
+     *
+     *   后端的验证码是**一次性**的（cache.take，取出即删，防重放）。
+     *   也就是说不管这次登录成功还是失败，那张验证码都已经作废了。
+     *   如果不刷新，用户改个密码再点登录，拿到的永远是"验证码已过期" ——
+     *   他并不知道要手动点一下图片，只会觉得"这系统坏了"。
+     *
+     *   这类"前端没跟上后端语义"的 bug 很常见，而且从后端日志上完全看不出来。
+     */
+    void refreshCaptcha();
     triggerShake();
   } finally {
     submitting.value = false;
@@ -77,17 +137,11 @@ async function handleSubmit(): Promise<void> {
 function fillDemo(): void {
   form.username = 'admin';
   form.password = 'Admin@123456';
-  form.captcha = 'DEMO';
+  // 密码可以一键填充，但验证码必须手动看 —— 这正是它存在的意义
 }
 
 onMounted(() => {
-  refreshCaptcha();
-  // 从守卫跳转过来时带了 redirect，登录成功后回到原页面
-  if (route.query.redirect) {
-    console.info('[login] 登录成功后将回到:', route.query.redirect);
-  }
-  void userStore;
-  void router;
+  void refreshCaptcha();
 });
 </script>
 
@@ -137,7 +191,12 @@ onMounted(() => {
 
         <el-form ref="formRef" :model="form" :rules="rules" size="large" @submit.prevent>
           <el-form-item prop="username">
-            <el-input v-model="form.username" placeholder="请输入管理员账号" clearable>
+            <el-input
+              v-model="form.username"
+              placeholder="请输入管理员账号"
+              clearable
+              @keyup.enter="handleSubmit"
+            >
               <template #prefix
                 ><el-icon><User /></el-icon
               ></template>
@@ -150,6 +209,7 @@ onMounted(() => {
               type="password"
               placeholder="请输入密码"
               show-password
+              @keyup.enter="handleSubmit"
             >
               <template #prefix
                 ><el-icon><Lock /></el-icon
@@ -159,10 +219,20 @@ onMounted(() => {
 
           <el-form-item prop="captcha">
             <div class="captcha-row">
-              <el-input v-model="form.captcha" placeholder="4 位字符" maxlength="4" />
-              <div class="captcha-box" title="点击刷新验证码" @click="refreshCaptcha">
-                <span v-if="!captchaSvg" class="captcha-ph">验证码</span>
-                <!-- eslint-disable-next-line vue/no-v-html -- 内容是本后端 svg-captcha 返回的 SVG，不是用户输入 -->
+              <el-input
+                v-model="form.captcha"
+                placeholder="4 位字符"
+                maxlength="4"
+                @keyup.enter="handleSubmit"
+              />
+              <div
+                class="captcha-box"
+                :class="{ loading: captchaLoading }"
+                title="点击刷新验证码"
+                @click="refreshCaptcha"
+              >
+                <span v-if="!captchaSvg" class="captcha-ph">点击加载</span>
+                <!-- eslint-disable-next-line vue/no-v-html -- 内容是本后端 svg-captcha 返回的 SVG，不含用户输入 -->
                 <span v-else v-html="captchaSvg" />
               </div>
             </div>
@@ -398,6 +468,16 @@ onMounted(() => {
 }
 .captcha-box:active {
   transform: scale(0.97);
+}
+.captcha-box.loading {
+  opacity: 0.55;
+  cursor: wait;
+}
+/* svg-captcha 生成的 SVG 没有自适应尺寸，这里统一撑满容器 */
+.captcha-box :deep(svg) {
+  width: 100%;
+  height: 100%;
+  display: block;
 }
 
 .meta {

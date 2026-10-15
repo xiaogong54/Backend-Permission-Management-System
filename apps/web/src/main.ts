@@ -3,6 +3,7 @@ import ElementPlus from 'element-plus';
 import zhCn from 'element-plus/es/locale/lang/zh-cn';
 import { createApp } from 'vue';
 import App from './App.vue';
+import permission from './directives/permission';
 import router from './router';
 import pinia from './store';
 
@@ -25,9 +26,13 @@ import './styles/index.css';
 const app = createApp(App);
 
 // 全量注册 Element Plus 图标，模板里可以直接写 <el-icon><Search /></el-icon>
+// 侧边栏的菜单图标是动态的（<component :is="iconName" />），也依赖这里注册
 for (const [name, component] of Object.entries(ElementPlusIconsVue)) {
   app.component(name, component);
 }
+
+// 按钮级权限指令 v-permission
+app.directive('permission', permission);
 
 app.use(pinia);
 app.use(router);

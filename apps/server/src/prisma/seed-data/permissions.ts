@@ -333,6 +333,9 @@ export const PERMISSIONS: PermissionSeed[] = [
  * 不给系统配置类权限（账号、角色、权限、日志）
  */
 const OPERATOR_CODES: string[] = [
+  // 数据看板：所有角色都要能进首页。
+  // 漏了它的话，运营登录后会被默认跳转到 /dashboard，然后立刻吃一个 403。
+  'dashboard:index:view',
   // 商品：可增删改查、上下架、调库存、导出
   'product:category:list',
   'product:category:create',
