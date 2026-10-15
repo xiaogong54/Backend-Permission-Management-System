@@ -1,0 +1,41 @@
+# ==========================================================================
+#  Git 换行符与文件类型规范
+# --------------------------------------------------------------------------
+#  为什么必须显式声明：
+#    Windows 默认把文本文件的换行转成 CRLF。而 .husky/ 下的钩子脚本是给
+#    Git Bash（sh）执行的，CRLF 会让 shebang 变成 "#!/usr/bin/env sh\r"，
+#    直接报 bad interpreter: No such file or directory —— 钩子静默失效。
+#    团队协作时，这还会导致"我这边没事、你那边一堆整文件 diff"。
+# ==========================================================================
+
+# 默认：仓库内统一 LF，工作区也检出为 LF
+* text=auto eol=lf
+
+# ---------- 必须保持 LF ----------
+# Git 钩子：CRLF 会让 sh 无法解析 shebang
+.husky/* text eol=lf
+*.sh text eol=lf
+# Dockerfile 里的续行符对 CRLF 敏感
+Dockerfile text eol=lf
+*.dockerfile text eol=lf
+
+# ---------- 必须保持 CRLF ----------
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# ---------- 二进制，不要做任何转换 ----------
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.pdf binary
+*.zip binary
+
+# ---------- 锁文件：不参与 diff 统计，避免 review 时刷屏 ----------
+pnpm-lock.yaml -diff
