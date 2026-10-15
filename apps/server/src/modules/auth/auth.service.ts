@@ -5,6 +5,7 @@ import bcrypt from 'bcryptjs';
 import { randomUUID } from 'node:crypto';
 import { create as createSvgCaptcha } from 'svg-captcha';
 import { CacheService } from '../../common/cache/cache.service';
+import { AUTH_CACHE } from '../../common/constants/cache-keys';
 import { ErrorCode } from '../../common/constants/error-code';
 import { BizException } from '../../common/exceptions/biz.exception';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -12,13 +13,6 @@ import type { LoginDto } from './dto/login.dto';
 
 /** 验证码有效期（秒）。太短用户来不及输，太长给暴力破解留窗口 */
 const CAPTCHA_TTL_SECONDS = 120;
-
-/**
- * 缓存键前缀。加前缀是为了避免不同业务写到同一个 Redis 库时键名撞车。
- * 导出它是为了 e2e 测试能直接往缓存里塞一张验证码 ——
- * 否则测试没法"认出" SVG 里的字符，登录的成功路径就永远测不到。
- */
-export const CAPTCHA_KEY_PREFIX = 'auth:captcha:';
 
 /**
  * 一个"用不上的" BCrypt 哈希，仅用于账号不存在时做等时比较。
@@ -37,11 +31,23 @@ export interface CaptchaVo {
   expiresIn: number;
 }
 
-/** JWT 载荷。sub 按 JWT 规范必须是字符串 */
+/**
+ * JWT 载荷
+ *
+ * jti / iat / exp 由 jsonwebtoken 自动写入，不需要我们手动填。
+ * 但类型上必须声明，否则守卫与登出逻辑取不到它们。
+ */
 export interface JwtPayload {
+  /** 管理员 id，按 JWT 规范是字符串 */
   sub: string;
   username: string;
   roles: string[];
+  /** JWT ID —— 登出黑名单的抓手 */
+  jti?: string;
+  /** 签发时间（秒级时间戳） */
+  iat?: number;
+  /** 过期时间（秒级时间戳） */
+  exp?: number;
 }
 
 /** 登录成功返回给前端的数据 */
@@ -55,6 +61,21 @@ export interface LoginVo {
   };
   roles: string[];
   permissions: string[];
+}
+
+/** 当前登录人信息（比 LoginVo 多几个字段，用于个人中心） */
+export interface ProfileVo {
+  userInfo: {
+    id: number;
+    username: string;
+    nickname: string;
+    avatar: string | null;
+    email: string | null;
+    phone: string | null;
+  };
+  roles: string[];
+  permissions: string[];
+  lastLoginAt: string | null;
 }
 
 /** 登录时能拿到的请求元信息，用于写审计日志 */
@@ -101,7 +122,7 @@ export class AuthService {
 
     const captchaId = randomUUID();
     this.cache.set(
-      `${CAPTCHA_KEY_PREFIX}${captchaId}`,
+      AUTH_CACHE.captcha(captchaId),
       captcha.text.toLowerCase(),
       CAPTCHA_TTL_SECONDS,
     );
@@ -117,9 +138,7 @@ export class AuthService {
    *   几分钟就能暴力撞开。take 则一次不中就作废，必须重新拿图。
    */
   verifyCaptcha(captchaId: string, input: string): void {
-    const expected = this.cache.take<string>(
-      `${CAPTCHA_KEY_PREFIX}${captchaId}`,
-    );
+    const expected = this.cache.take<string>(AUTH_CACHE.captcha(captchaId));
 
     if (!expected) {
       throw new BizException(
@@ -213,7 +232,12 @@ export class AuthService {
       username: admin.username,
       roles,
     };
-    const token = await this.jwt.signAsync(payload);
+    const token = await this.jwt.signAsync(payload, {
+      // ★ jti 是登出黑名单的唯一抓手。
+      //   没有它，"退出登录"只能做到前端删掉本地 token，
+      //   服务端依然认这个 token —— 那是假登出。
+      jwtid: randomUUID(),
+    });
 
     // ---- 6. 记录登录时间与审计日志 ----
     // 用 allSettled：这两步失败不应该让登录失败。
@@ -246,6 +270,108 @@ export class AuthService {
     };
   }
 
+  // ==========================================================================
+  //  当前登录人 / 登出
+  // ==========================================================================
+
+  /**
+   * 查询当前登录人的完整信息
+   *
+   * ★ 为什么这里要重新查库，而不是直接用 token 里的载荷
+   *   守卫验签只证明"这个 token 是我签发的、没被篡改"，
+   *   它**不保证这个账号现在还能用**。
+   *   签发之后账号可能被禁用、被删除、角色被改 —— token 里存的是签发那一刻的快照。
+   *
+   *   "token 有效" 和 "账号可用" 是两件事。
+   *   所以凡是要拿账号现状的接口，都必须回源查库。
+   */
+  async getProfile(adminId: bigint): Promise<ProfileVo> {
+    const admin = await this.prisma.sysAdmin.findFirst({
+      where: { id: adminId, deletedAt: null },
+      select: {
+        id: true,
+        username: true,
+        nickname: true,
+        avatar: true,
+        email: true,
+        phone: true,
+        status: true,
+        lastLoginAt: true,
+      },
+    });
+
+    if (!admin) {
+      throw new BizException(
+        ErrorCode.UNAUTHORIZED,
+        '账号已被删除，请重新登录',
+      );
+    }
+    if (admin.status !== 1) {
+      throw new BizException(ErrorCode.ACCOUNT_DISABLED);
+    }
+
+    // 角色可能刚被管理员改过，这里也用最新的，不用 token 里的快照
+    const { roles, permissions } = await this.loadRolesAndPermissions(admin.id);
+
+    return {
+      userInfo: {
+        id: Number(admin.id),
+        username: admin.username,
+        nickname: admin.nickname,
+        avatar: admin.avatar,
+        email: admin.email,
+        phone: admin.phone,
+      },
+      roles,
+      permissions,
+      lastLoginAt: admin.lastLoginAt?.toISOString() ?? null,
+    };
+  }
+
+  /**
+   * 退出登录：把当前 token 加入黑名单
+   *
+   * TTL 只设到这个 token 原本的过期时间 —— 过期之后 JWT 自己就失效了，
+   * 黑名单条目没有继续保留的意义，让缓存自动清掉最省内存。
+   */
+  async logout(payload: JwtPayload): Promise<{ message: string }> {
+    if (payload.jti && payload.exp) {
+      const ttlSeconds = payload.exp - Math.floor(Date.now() / 1000);
+
+      if (ttlSeconds > 0) {
+        // cache.set 是同步的，不需要 await
+        this.cache.set(
+          AUTH_CACHE.tokenBlacklist(payload.jti),
+          1,
+          // 至少 1 秒：避免边界情况下算出 0 或负数，导致写进一个立即过期的键
+          Math.max(ttlSeconds, 1),
+        );
+      }
+    } else {
+      // 理论上不会走到这里（签发时一定带 jti 和 exp）。
+      // 但必须留这个分支：旧版本签发的、没有 jti 的 token 是拉不黑的，
+      // 静默跳过会让"登出失败"变得完全不可观测。
+      this.logger.warn(
+        `登出时 token 缺少 jti/exp，无法加入黑名单: sub=${payload.sub}`,
+      );
+    }
+
+    await this.writeLoginLog({
+      adminId: BigInt(payload.sub),
+      username: payload.username,
+      success: true,
+      message: '退出登录',
+      action: '退出登录',
+      ctx: {},
+    });
+
+    return { message: '已退出登录' };
+  }
+
+  // ==========================================================================
+  //  内部工具
+  // ==========================================================================
+
   /**
    * 加载角色码与权限码
    *
@@ -277,7 +403,7 @@ export class AuthService {
   }
 
   /**
-   * 写登录审计日志
+   * 写登录 / 登出审计日志
    *
    * 自带 try/catch：日志系统出问题绝不能阻断业务。
    * 后面做全局操作日志拦截器时要遵守同一原则。
@@ -288,6 +414,8 @@ export class AuthService {
     success: boolean;
     message: string;
     ctx: LoginContext;
+    /** 不传时按 success 自动推断为「登录成功 / 登录失败」 */
+    action?: string;
   }): Promise<void> {
     try {
       await this.prisma.sysOperationLog.create({
@@ -296,7 +424,7 @@ export class AuthService {
           adminId: params.adminId ?? null,
           username: params.username,
           module: '认证',
-          action: params.success ? '登录成功' : '登录失败',
+          action: params.action ?? (params.success ? '登录成功' : '登录失败'),
           status: params.success ? 1 : 0,
           errorMsg: params.success ? null : params.message,
           ip: params.ctx.ip ?? null,
@@ -306,7 +434,7 @@ export class AuthService {
       });
     } catch (e) {
       this.logger.error(
-        `写登录日志失败（不影响登录本身）: ${(e as Error).message}`,
+        `写认证日志失败（不影响业务本身）: ${(e as Error).message}`,
       );
     }
   }

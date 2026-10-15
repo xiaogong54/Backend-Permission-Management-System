@@ -5,7 +5,7 @@ import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
 import { CacheService } from './../src/common/cache/cache.service';
-import { CAPTCHA_KEY_PREFIX } from './../src/modules/auth/auth.service';
+import { AUTH_CACHE } from './../src/common/constants/cache-keys';
 import { configureApp } from './../src/setup-app';
 
 /**
@@ -19,6 +19,9 @@ import { configureApp } from './../src/setup-app';
  */
 const API = '/api/v1';
 const LOGIN = `${API}/auth/login`;
+const PROFILE = `${API}/auth/profile`;
+const LOGOUT = `${API}/auth/logout`;
+const HEALTH = '/health';
 
 /** 统一响应体 */
 interface ApiBody<T> {
@@ -38,6 +41,26 @@ interface LoginData {
   };
   roles: string[];
   permissions: string[];
+}
+
+interface ProfileData {
+  userInfo: {
+    id: number;
+    username: string;
+    nickname: string;
+    avatar: string | null;
+    email: string | null;
+    phone: string | null;
+  };
+  roles: string[];
+  permissions: string[];
+  lastLoginAt: string | null;
+}
+
+interface CaptchaData {
+  captchaId: string;
+  svg: string;
+  expiresIn: number;
 }
 
 /**
@@ -61,8 +84,18 @@ describe('认证 (e2e)', () => {
   /** 往缓存里塞一张答案已知的验证码，返回它的 captchaId */
   function issueCaptcha(text = 'abcd'): string {
     const captchaId = randomUUID();
-    cache.set(`${CAPTCHA_KEY_PREFIX}${captchaId}`, text.toLowerCase(), 120);
+    cache.set(AUTH_CACHE.captcha(captchaId), text.toLowerCase(), 120);
     return captchaId;
+  }
+
+  /** 完整走一次登录，返回 token */
+  async function loginAsAdmin(): Promise<string> {
+    const captchaId = issueCaptcha('abcd');
+    const res = await request(app.getHttpServer())
+      .post(LOGIN)
+      .send({ ...ADMIN, captchaId, captcha: 'abcd' })
+      .expect(200);
+    return (res.body as ApiBody<LoginData>).data.token;
   }
 
   beforeAll(async () => {
@@ -71,7 +104,9 @@ describe('认证 (e2e)', () => {
     }).compile();
 
     app = moduleFixture.createNestApplication();
-    // ★ 复用生产环境的全局配置，保证这里测的就是线上行为
+    // ★ 复用生产环境的全局配置，保证这里测的就是线上行为。
+    //   全局守卫是通过 AppModule 里的 APP_GUARD 注册的，
+    //   所以只要 import 了 AppModule 就自动生效，不需要在这里补。
     configureApp(app);
     await app.init();
 
@@ -82,133 +117,255 @@ describe('认证 (e2e)', () => {
     await app.close();
   });
 
-  it('验证码与密码都正确 → 登录成功并返回 JWT', async () => {
-    const captchaId = issueCaptcha('abcd');
+  // ==========================================================================
+  //  图形验证码
+  // ==========================================================================
 
-    const res = await request(app.getHttpServer())
-      .post(LOGIN)
-      .send({ ...ADMIN, captchaId, captcha: 'abcd' })
-      .expect(200);
+  describe('图形验证码', () => {
+    it('返回 captchaId 与 SVG，且 SVG 中不含明文', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${API}/auth/captcha`)
+        .expect(200);
+      const body = res.body as ApiBody<CaptchaData>;
 
-    const body = res.body as ApiBody<LoginData>;
+      expect(body.code).toBe(0);
+      expect(body.data.captchaId).toMatch(/^[0-9a-f-]{36}$/);
+      expect(body.data.svg).toContain('<svg');
+      expect(body.data.expiresIn).toBe(120);
+      // ★ 明文绝不能出现在返回内容里，否则攻击者直接解析字符串就能绕过验证码
+      expect(body.data.svg).not.toContain('<text');
+    });
 
-    expect(body.code).toBe(0);
-    expect(typeof body.traceId).toBe('string');
+    it('每次请求的 captchaId 都不同（无状态设计）', async () => {
+      const a = await request(app.getHttpServer()).get(`${API}/auth/captcha`);
+      const b = await request(app.getHttpServer()).get(`${API}/auth/captcha`);
 
-    // JWT 必须正好三段（header.payload.signature）
-    expect(body.data.token.split('.')).toHaveLength(3);
-
-    expect(body.data.userInfo.username).toBe('admin');
-    // ★ BigInt 必须已经转成 number，否则 JSON.stringify 会抛
-    //   "Do not know how to serialize a BigInt"
-    expect(typeof body.data.userInfo.id).toBe('number');
-
-    // 超级管理员走通配权限，不落权限表
-    expect(body.data.roles).toContain('SUPER_ADMIN');
-    expect(body.data.permissions).toEqual(['*']);
+      expect((a.body as ApiBody<CaptchaData>).data.captchaId).not.toBe(
+        (b.body as ApiBody<CaptchaData>).data.captchaId,
+      );
+    });
   });
 
-  it('验证码大小写不敏感', async () => {
-    const captchaId = issueCaptcha('aBcD');
+  // ==========================================================================
+  //  登录
+  // ==========================================================================
 
-    const res = await request(app.getHttpServer())
-      .post(LOGIN)
-      .send({ ...ADMIN, captchaId, captcha: 'abcd' })
-      .expect(200);
+  describe('登录', () => {
+    it('验证码与密码都正确 → 登录成功并返回 JWT', async () => {
+      const captchaId = issueCaptcha('abcd');
 
-    expect((res.body as ApiBody<LoginData>).code).toBe(0);
+      const res = await request(app.getHttpServer())
+        .post(LOGIN)
+        .send({ ...ADMIN, captchaId, captcha: 'abcd' })
+        .expect(200);
+
+      const body = res.body as ApiBody<LoginData>;
+
+      expect(body.code).toBe(0);
+      expect(typeof body.traceId).toBe('string');
+
+      // JWT 必须正好三段（header.payload.signature）
+      expect(body.data.token.split('.')).toHaveLength(3);
+
+      expect(body.data.userInfo.username).toBe('admin');
+      // ★ BigInt 必须已经转成 number，否则 JSON.stringify 会抛
+      //   "Do not know how to serialize a BigInt"
+      expect(typeof body.data.userInfo.id).toBe('number');
+
+      // 超级管理员走通配权限，不落权限表
+      expect(body.data.roles).toContain('SUPER_ADMIN');
+      expect(body.data.permissions).toEqual(['*']);
+    });
+
+    it('验证码大小写不敏感', async () => {
+      const captchaId = issueCaptcha('aBcD');
+
+      const res = await request(app.getHttpServer())
+        .post(LOGIN)
+        .send({ ...ADMIN, captchaId, captcha: 'abcd' })
+        .expect(200);
+
+      expect((res.body as ApiBody<LoginData>).code).toBe(0);
+    });
+
+    it('同一张验证码只能用一次（防重放）', async () => {
+      const captchaId = issueCaptcha('abcd');
+      const payload = { ...ADMIN, captchaId, captcha: 'abcd' };
+
+      await request(app.getHttpServer()).post(LOGIN).send(payload).expect(200);
+
+      // 第二次必须失败 —— 这条断言守着验证码不被暴力枚举的能力
+      const second = await request(app.getHttpServer())
+        .post(LOGIN)
+        .send(payload)
+        .expect(401);
+
+      expect((second.body as ApiBody<null>).code).toBe(20002);
+    });
+
+    it('验证码错误 → 20002', async () => {
+      const captchaId = issueCaptcha('abcd');
+
+      const res = await request(app.getHttpServer())
+        .post(LOGIN)
+        .send({ ...ADMIN, captchaId, captcha: 'zzzz' })
+        .expect(401);
+
+      expect((res.body as ApiBody<null>).code).toBe(20002);
+    });
+
+    it('验证码已过期 → 20002', async () => {
+      const res = await request(app.getHttpServer())
+        .post(LOGIN)
+        .send({ ...ADMIN, captchaId: randomUUID(), captcha: 'abcd' })
+        .expect(401);
+
+      expect((res.body as ApiBody<null>).code).toBe(20002);
+    });
+
+    it('密码错误 → 20001', async () => {
+      const captchaId = issueCaptcha('abcd');
+
+      const res = await request(app.getHttpServer())
+        .post(LOGIN)
+        .send({
+          username: 'admin',
+          password: 'wrong-password',
+          captchaId,
+          captcha: 'abcd',
+        })
+        .expect(401);
+
+      expect((res.body as ApiBody<null>).code).toBe(20001);
+    });
+
+    it('账号不存在与密码错误返回同一错误码（不泄露账号是否存在）', async () => {
+      const captchaIdA = issueCaptcha('abcd');
+      const notExist = await request(app.getHttpServer())
+        .post(LOGIN)
+        .send({
+          username: 'no-such-user',
+          password: 'whatever',
+          captchaId: captchaIdA,
+          captcha: 'abcd',
+        })
+        .expect(401);
+
+      const captchaIdB = issueCaptcha('abcd');
+      const wrongPwd = await request(app.getHttpServer())
+        .post(LOGIN)
+        .send({
+          username: 'admin',
+          password: 'wrong-password',
+          captchaId: captchaIdB,
+          captcha: 'abcd',
+        })
+        .expect(401);
+
+      const a = notExist.body as ApiBody<null>;
+      const b = wrongPwd.body as ApiBody<null>;
+
+      // 两者必须完全一致，否则攻击者能靠错误信息 / 状态码差异枚举账号
+      expect(a.code).toBe(b.code);
+      expect(a.message).toBe(b.message);
+    });
+
+    it('缺少必填字段被 ValidationPipe 拦下', async () => {
+      const res = await request(app.getHttpServer())
+        .post(LOGIN)
+        .send({ username: 'admin' })
+        .expect(400);
+
+      expect((res.body as ApiBody<null>).code).toBe(10001);
+    });
   });
 
-  it('同一张验证码只能用一次（防重放）', async () => {
-    const captchaId = issueCaptcha('abcd');
-    const payload = { ...ADMIN, captchaId, captcha: 'abcd' };
+  // ==========================================================================
+  //  JWT 守卫（第 4 步的核心验收点）
+  // ==========================================================================
 
-    // 第一次成功
-    await request(app.getHttpServer()).post(LOGIN).send(payload).expect(200);
+  describe('JWT 守卫', () => {
+    it('@Public 接口无需 token 即可访问', async () => {
+      await request(app.getHttpServer()).get(HEALTH).expect(200);
+    });
 
-    // 第二次必须失败 —— 这条断言守着验证码不被暴力枚举的能力
-    const second = await request(app.getHttpServer())
-      .post(LOGIN)
-      .send(payload)
-      .expect(401);
+    it('受保护接口不带 token → 401 / 10002', async () => {
+      const res = await request(app.getHttpServer()).get(PROFILE).expect(401);
+      const body = res.body as ApiBody<null>;
 
-    expect((second.body as ApiBody<null>).code).toBe(20002);
-  });
+      expect(body.code).toBe(10002);
+      expect(body.message).toContain('未登录');
+    });
 
-  it('验证码错误 → 20002', async () => {
-    const captchaId = issueCaptcha('abcd');
+    it('Authorization scheme 不是 Bearer → 401（不做宽松解析）', async () => {
+      const token = await loginAsAdmin();
 
-    const res = await request(app.getHttpServer())
-      .post(LOGIN)
-      .send({ ...ADMIN, captchaId, captcha: 'zzzz' })
-      .expect(401);
+      // 常见的前端错误实现：写成 "Token xxx"，或者干脆不带 scheme
+      await request(app.getHttpServer())
+        .get(PROFILE)
+        .set('Authorization', `Token ${token}`)
+        .expect(401);
 
-    expect((res.body as ApiBody<null>).code).toBe(20002);
-  });
+      await request(app.getHttpServer())
+        .get(PROFILE)
+        .set('Authorization', token)
+        .expect(401);
+    });
 
-  it('验证码已过期 → 20002', async () => {
-    const res = await request(app.getHttpServer())
-      .post(LOGIN)
-      .send({ ...ADMIN, captchaId: randomUUID(), captcha: 'abcd' })
-      .expect(401);
+    it('token 被篡改 → 401', async () => {
+      const token = await loginAsAdmin();
+      // 改动 payload 部分的末尾，签名就不再匹配
+      const [h, p, s] = token.split('.');
+      const tampered = `${h}.${p.slice(0, -2)}xx.${s}`;
 
-    expect((res.body as ApiBody<null>).code).toBe(20002);
-  });
+      const res = await request(app.getHttpServer())
+        .get(PROFILE)
+        .set('Authorization', `Bearer ${tampered}`)
+        .expect(401);
 
-  it('密码错误 → 20001', async () => {
-    const captchaId = issueCaptcha('abcd');
+      expect((res.body as ApiBody<null>).code).toBe(10002);
+    });
 
-    const res = await request(app.getHttpServer())
-      .post(LOGIN)
-      .send({
-        username: 'admin',
-        password: 'wrong-password',
-        captchaId,
-        captcha: 'abcd',
-      })
-      .expect(401);
+    it('带合法 token → 200 并返回当前登录人', async () => {
+      const token = await loginAsAdmin();
 
-    expect((res.body as ApiBody<null>).code).toBe(20001);
-  });
+      const res = await request(app.getHttpServer())
+        .get(PROFILE)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
 
-  it('账号不存在与密码错误返回同一错误码（不泄露账号是否存在）', async () => {
-    const captchaIdA = issueCaptcha('abcd');
-    const notExist = await request(app.getHttpServer())
-      .post(LOGIN)
-      .send({
-        username: 'no-such-user',
-        password: 'whatever',
-        captchaId: captchaIdA,
-        captcha: 'abcd',
-      })
-      .expect(401);
+      const body = res.body as ApiBody<ProfileData>;
 
-    const captchaIdB = issueCaptcha('abcd');
-    const wrongPwd = await request(app.getHttpServer())
-      .post(LOGIN)
-      .send({
-        username: 'admin',
-        password: 'wrong-password',
-        captchaId: captchaIdB,
-        captcha: 'abcd',
-      })
-      .expect(401);
+      expect(body.code).toBe(0);
+      expect(body.data.userInfo.username).toBe('admin');
+      expect(body.data.roles).toContain('SUPER_ADMIN');
+      expect(body.data.permissions).toEqual(['*']);
+      // 登录时会写 lastLoginAt，所以这里应该有值
+      expect(body.data.lastLoginAt).not.toBeNull();
+    });
 
-    const a = notExist.body as ApiBody<null>;
-    const b = wrongPwd.body as ApiBody<null>;
+    it('登出后同一个 token 立即失效（黑名单生效）', async () => {
+      const token = await loginAsAdmin();
 
-    // 两者必须完全一致，否则攻击者能靠错误信息 / 状态码差异枚举账号
-    expect(a.code).toBe(b.code);
-    expect(a.message).toBe(b.message);
-  });
+      // 登出前可用
+      await request(app.getHttpServer())
+        .get(PROFILE)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
 
-  it('缺少必填字段被 ValidationPipe 拦下', async () => {
-    // whitelist + 必填校验生效时，缺字段会因为校验失败返回 10001
-    const res = await request(app.getHttpServer())
-      .post(LOGIN)
-      .send({ username: 'admin' })
-      .expect(400);
+      await request(app.getHttpServer())
+        .post(LOGOUT)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
 
-    expect((res.body as ApiBody<null>).code).toBe(10001);
+      // ★ 这是 JWT 黑名单存在的全部意义：
+      //   无状态 token 本身无法收回，登出必须靠服务端额外记账
+      const afterLogout = await request(app.getHttpServer())
+        .get(PROFILE)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(401);
+
+      expect((afterLogout.body as ApiBody<null>).code).toBe(10002);
+    });
   });
 });
