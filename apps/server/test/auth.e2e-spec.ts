@@ -368,4 +368,54 @@ describe('认证 (e2e)', () => {
       expect((afterLogout.body as ApiBody<null>).code).toBe(10002);
     });
   });
+
+  // ==========================================================================
+  //  traceId
+  // ==========================================================================
+
+  describe('traceId', () => {
+    it('成功响应带 traceId', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${API}/auth/captcha`)
+        .expect(200);
+      const body = res.body as ApiBody<CaptchaData>;
+      expect(body.traceId).toMatch(/^[0-9a-f]{16}$/);
+    });
+
+    it('★ 失败响应也必须带 traceId（401 由守卫抛出，中间件要能覆盖到）', async () => {
+      const res = await request(app.getHttpServer()).get(PROFILE).expect(401);
+      const body = res.body as ApiBody<null>;
+
+      expect(body.code).toBe(10002);
+      /**
+       * ★ 这条断言锁住的是一个曾经真实存在的 bug：
+       *   traceId 原先在 ResponseInterceptor 里生成，但守卫抛异常时拦截器
+       *   根本不会执行 —— 于是所有 401/403/404 的 traceId 都是空字符串。
+       *   而 traceId 的价值恰恰在出错时。
+       *
+       *   修法是把它挪到 TraceIdMiddleware（中间件是第一个执行阶段）。
+       *   有这条断言在，将来谁再挪回拦截器都会立刻红。
+       */
+      expect(body.traceId).toMatch(/^[0-9a-f]{16}$/);
+    });
+
+    it('响应体里的 traceId 与响应头 x-trace-id 一致', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${API}/auth/captcha`)
+        .expect(200);
+      const body = res.body as ApiBody<CaptchaData>;
+      expect(res.headers['x-trace-id']).toBe(body.traceId);
+    });
+
+    it('上游传入的 x-trace-id 会被沿用（跨服务链路能串起来）', async () => {
+      const upstream = 'abcdef0123456789';
+      const res = await request(app.getHttpServer())
+        .get(`${API}/auth/captcha`)
+        .set('x-trace-id', upstream)
+        .expect(200);
+
+      expect((res.body as ApiBody<CaptchaData>).traceId).toBe(upstream);
+      expect(res.headers['x-trace-id']).toBe(upstream);
+    });
+  });
 });

@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import type { Request } from 'express';
 import { Observable, map } from 'rxjs';
 import { ErrorCode } from '../constants/error-code';
+import type { WithTraceId } from '../middleware/trace-id.middleware';
 
 /** 统一响应体 */
 export interface ApiResponse<T> {
@@ -34,8 +35,14 @@ export function raw<T>(value: T): T & { [RAW_RESPONSE]: true } {
  * 把 controller 的返回值统一包装成：
  *   { code: 0, message: 'ok', data: <返回值>, traceId: '...' }
  *
- * 同时给每个请求生成 traceId，写进响应体。
- * 排查线上问题时，用户截图里的 traceId 能直接定位到日志。
+ * ★ traceId 是**读**的，不是这里生成的
+ *   生成工作已经移到 TraceIdMiddleware（见那个文件的注释）。
+ *   原因：NestJS 的执行顺序是「中间件 → 守卫 → 拦截器」，
+ *   守卫抛异常时拦截器不会执行 —— 如果 traceId 在这里生成，
+ *   所有 401 / 403 / 404 响应的 traceId 都会是空的。
+ *
+ *   这里的 `??` 是防御性兜底：万一中间件因为某种原因没注册，
+ *   宁可现场生成一个，也不要返回空 traceId 让问题无法定位。
  */
 @Injectable()
 export class ResponseInterceptor<T> implements NestInterceptor<
@@ -46,15 +53,10 @@ export class ResponseInterceptor<T> implements NestInterceptor<
     context: ExecutionContext,
     next: CallHandler<T>,
   ): Observable<ApiResponse<T> | T> {
-    const request = context
-      .switchToHttp()
-      .getRequest<Request & { traceId?: string }>();
+    const request = context.switchToHttp().getRequest<Request & WithTraceId>();
 
-    // 优先复用上游网关传进来的 traceId，没有就自己生成
-    const incoming = request.headers['x-trace-id'];
     const traceId =
-      (typeof incoming === 'string' && incoming) ||
-      randomUUID().replace(/-/g, '').slice(0, 16);
+      request.traceId ?? randomUUID().replace(/-/g, '').slice(0, 16);
     request.traceId = traceId;
 
     return next.handle().pipe(

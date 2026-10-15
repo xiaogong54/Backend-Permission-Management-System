@@ -6,9 +6,11 @@ import {
   HttpStatus,
   Logger,
 } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import type { Request, Response } from 'express';
 import { ERROR_MESSAGE, ErrorCode } from '../constants/error-code';
 import { BizException } from '../exceptions/biz.exception';
+import type { WithTraceId } from '../middleware/trace-id.middleware';
 
 /**
  * 全局异常过滤器 —— 把所有异常收敛成统一响应结构
@@ -29,7 +31,18 @@ export class AllExceptionsFilter implements ExceptionFilter {
     const response = ctx.getResponse<Response>();
     const request = ctx.getRequest<Request>();
 
-    const traceId = (request as Request & { traceId?: string }).traceId ?? '';
+    /**
+     * traceId 由 TraceIdMiddleware 生成（中间件是第一个执行的阶段，
+     * 因此能覆盖守卫抛出的 401/403、以及连路由都没匹配上的 404）。
+     *
+     * ★ 这里的兜底生成有一个容易被忽略的好处：
+     *   下面日志里打的 traceId 与返回给客户端的**是同一个值**（同一个局部变量）。
+     *   如果两边各生成各的，用户截图里的那串字符在日志里根本搜不到 ——
+     *   traceId 就退化成了一个装饰品。必须在代码结构上保证它们同源。
+     */
+    const traceId =
+      (request as Request & WithTraceId).traceId ??
+      randomUUID().replace(/-/g, '').slice(0, 16);
 
     let httpStatus: number = HttpStatus.INTERNAL_SERVER_ERROR;
     let code: number = ErrorCode.INTERNAL_ERROR;

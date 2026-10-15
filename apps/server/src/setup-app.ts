@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { ResponseInterceptor } from './common/interceptors/response.interceptor';
+import { traceIdMiddleware } from './common/middleware/trace-id.middleware';
 import type { AppConfig } from './config/configuration';
 
 /**
@@ -25,6 +26,19 @@ export function configureApp(app: INestApplication): AppConfig {
   const config = app.get(ConfigService);
   const appConfig = config.get<AppConfig>('') ?? ({} as AppConfig);
   const prefix = appConfig.apiPrefix ?? 'api/v1';
+
+  // ---------------------------------------------------------------------------
+  // traceId 中间件 —— 必须是第一个注册的
+  //
+  // ★ 为什么它是中间件而不是拦截器
+  //   NestJS 的执行顺序是「中间件 → 守卫 → 拦截器 → 管道 → 控制器」。
+  //   守卫抛异常时（401 / 403）拦截器根本不会执行，路由没匹配上时（404）
+  //   更是连控制器都没有 —— 这两种情况的 traceId 就会是空的。
+  //   而 traceId 的价值恰恰在出错时。放在中间件里才能覆盖所有出口。
+  //
+  //   详见 common/middleware/trace-id.middleware.ts 的注释。
+  // ---------------------------------------------------------------------------
+  app.use(traceIdMiddleware);
 
   // ---------------------------------------------------------------------------
   // 全局管道：DTO 校验 + 类型转换
