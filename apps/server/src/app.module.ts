@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { CacheModule } from './common/cache/cache.module';
 import configuration from './config/configuration';
+import { AuthModule } from './modules/auth/auth.module';
 import { HealthModule } from './modules/health/health.module';
 import { PrismaModule } from './prisma/prisma.module';
 
@@ -9,7 +11,7 @@ import { PrismaModule } from './prisma/prisma.module';
  *
  * 模块划分遵循"按业务域分包"：
  *   modules/   业务模块（health / auth / system / product / order / user / dashboard）
- *   common/    跨模块基础设施（异常、拦截器、装饰器、DTO）
+ *   common/    跨模块基础设施（异常、拦截器、装饰器、DTO、缓存）
  *   prisma/    数据访问层
  *   config/    配置
  *
@@ -25,7 +27,11 @@ import { PrismaModule } from './prisma/prisma.module';
       envFilePath: ['.env'],
       cache: true,
     }),
+    // 基础设施（都声明了 @Global）
+    CacheModule,
     PrismaModule,
+    // 业务模块
+    AuthModule,
     HealthModule,
   ],
 })
