@@ -1,0 +1,83 @@
+/* ==========================================================================
+   设计令牌 (Design Tokens)
+   —— 全站唯一的取值来源，与 docs/原型.html 完全一致。
+      要换风格只改本文件，组件样式里不得出现魔数。
+   ========================================================================== */
+:root {
+  /* ---------- 品牌色 · 清爽专业蓝 ---------- */
+  --brand-50: #eff6ff;
+  --brand-100: #dbeafe;
+  --brand-200: #bfdbfe;
+  --brand-300: #93c5fd;
+  --brand-400: #60a5fa;
+  --brand-500: #3b82f6;
+  --brand-600: #2563eb; /* 主色 */
+  --brand-700: #1d4ed8; /* hover */
+  --brand-800: #1e40af; /* active */
+  --brand-900: #1e3a8a;
+
+  /* ---------- 语义色 ---------- */
+  --success: #16a34a;
+  --success-bg: #f0fdf4;
+  --warning: #d97706;
+  --warning-bg: #fffbeb;
+  --danger: #dc2626;
+  --danger-bg: #fef2f2;
+
+  /* ---------- 中性色（slate 系） ---------- */
+  --text-1: #0f172a; /* 标题 */
+  --text-2: #334155; /* 正文 */
+  --text-3: #64748b; /* 次要 */
+  --text-4: #94a3b8; /* 占位 */
+
+  --border: #e2e8f0;
+  --border-light: #f1f5f9;
+
+  --bg-page: #f5f7fa;
+  --bg-card: #ffffff;
+
+  /* ---------- 侧边栏 ---------- */
+  --sider-bg: #0f172a;
+  --sider-text: #cbd5e1;
+  --sider-text-dim: #64748b;
+  --sider-active-bg: rgba(37, 99, 235, 0.18);
+  --sider-hover-bg: rgba(255, 255, 255, 0.06);
+
+  /* ---------- 圆角 ---------- */
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --r-xl: 16px;
+
+  /* ---------- 阴影 ---------- */
+  --sh-xs: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --sh-md: 0 4px 12px rgba(15, 23, 42, 0.08);
+  --sh-lg: 0 12px 32px rgba(15, 23, 42, 0.12);
+  --sh-xl: 0 24px 56px rgba(15, 23, 42, 0.16);
+
+  /* ---------- 动效 ---------- */
+  --dur-fast: 150ms;
+  --dur-base: 220ms;
+  --dur-slow: 320ms;
+  --dur-slower: 480ms;
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* ---------- 布局尺寸 ---------- */
+  --sider-w: 236px;
+  --sider-w-mini: 64px;
+  --topbar-h: 56px;
+
+  /* ---------- 覆盖 Element Plus 的主题变量，让组件跟随我们的主色 ---------- */
+  --el-color-primary: var(--brand-600);
+  --el-color-primary-light-3: var(--brand-400);
+  --el-color-primary-light-5: var(--brand-300);
+  --el-color-primary-light-7: var(--brand-200);
+  --el-color-primary-light-8: var(--brand-100);
+  --el-color-primary-light-9: var(--brand-50);
+  --el-color-primary-dark-2: var(--brand-700);
+  --el-border-radius-base: var(--r-md);
+  --el-font-size-base: 14px;
+}

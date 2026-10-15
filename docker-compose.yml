@@ -1,0 +1,69 @@
+# ============================================================================
+#  mall-admin · 本地开发依赖服务
+#  用法：
+#    docker compose up -d          启动
+#    docker compose ps             看状态
+#    docker compose logs -f mysql  看日志
+#    docker compose down           停止（数据保留在 volume 里）
+#    docker compose down -v        停止并删除数据（慎用）
+#
+#  ⚠️ 端口说明：
+#    本机 3306 已被 phpstudy 自带的 MySQL 8.0.12 占用，
+#    所以这里把容器内的 3306 映射到宿主机的 3307，避免冲突。
+#    用这套 compose 时，apps/server/.env 里要写：
+#      DATABASE_URL="mysql://root:root@127.0.0.1:3307/mall_admin"
+#      DATABASE_PORT=3307
+# ============================================================================
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: mall-admin-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: mall_admin
+      TZ: Asia/Shanghai
+    # 这三个参数必须显式指定，和本机 phpstudy 那套保持一致的"正确配置"：
+    #   default-storage-engine=InnoDB —— 没有它建出来的表是 MyISAM，不支持事务
+    #   character-set-server=utf8mb4 —— MySQL 里 utf8 是 utf8mb3 的别名，存不了 emoji
+    #   collation-server        —— 必须与 Prisma 生成的建表语句一致，否则 JOIN 会报 1267
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-storage-engine=InnoDB
+      - --default-authentication-plugin=mysql_native_password
+      - --innodb-buffer-pool-size=256M
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    container_name: mall-admin-redis
+    restart: unless-stopped
+    # appendonly yes 开启 AOF 持久化：验证码和 Token 黑名单丢了会直接影响登录
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "redis123"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redis123", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  mysql-data:
+    name: mall-admin-mysql-data
+  redis-data:
+    name: mall-admin-redis-data

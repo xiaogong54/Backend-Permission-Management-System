@@ -1,0 +1,13 @@
+#!/usr/bin/env sh
+# ============================================================================
+#  pre-commit 钩子
+#  只对「本次提交涉及的文件」跑 Prettier，不做全量格式化 —— 否则一次提交
+#  会带上几百个无关文件的改动，review 时完全看不出真正的变更。
+#
+#  为什么用 node 直接调而不是 pnpm exec：
+#    Windows 上 Git 钩子跑在 Git Bash 里，而 pnpm 是 pnpm.CMD，
+#    Git Bash 不认 .CMD 后缀，会报 command not found。用 node 直调最稳。
+#
+#  紧急跳过：git commit --no-verify
+# ============================================================================
+node ./node_modules/lint-staged/bin/lint-staged.js

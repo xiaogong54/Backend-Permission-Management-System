@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+# ============================================================================
+#  commit-msg 钩子
+#  校验提交信息是否符合 Conventional Commits 规范
+#    feat(server): 新增管理员登录接口
+#    fix(web): 修复侧边栏折叠后图标未居中
+#
+#  紧急跳过：git commit --no-verify
+# ============================================================================
+node ./node_modules/@commitlint/cli/cli.js --edit "$1"

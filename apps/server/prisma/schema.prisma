@@ -1,0 +1,215 @@
+// ============================================================================
+//  mall-admin · Prisma Schema
+//  Provider : MySQL 8.0
+//  字符集   : utf8mb4 / utf8mb4_unicode_ci
+// ----------------------------------------------------------------------------
+//  六条约定（与 docs/设计概览.md 保持一致）：
+//    1. Prisma 字段名用 camelCase，靠 @map 映射到数据库的 snake_case 列名
+//       **每个多词字段都必须写 @map，漏写就会生成驼峰列名**
+//    2. relationMode = "prisma" —— 不在数据库层建外键，引用完整性由应用层保证
+//    3. 金额一律 Decimal，禁止 Float / Double
+//    4. 时间用 DateTime(0) 秒精度；日志表用 DateTime(3) 毫秒精度
+//    5. 主数据用 deletedAt 软删除，唯一索引把 deletedAt 纳入联合列
+//       —— MySQL 中多个 NULL 互不冲突，因此"删除后可重建同名记录"
+//       —— 代价：业务层新增/改名时必须额外查一次重
+//    6. 联合索引里的列名会自动使用 @map 后的名字
+// ============================================================================
+
+// Prisma 7 的默认生成器。与已废弃的 prisma-client-js 的差别：
+//   · output 变成必填，代码生成到项目里而不是 node_modules
+//   · 运行时不再自动加载 .env，改由 prisma7.config.ts + dotenv 负责
+//   · 通过 moduleFormat 同时支持 ESM 与 CommonJS
+//   · 输出纯 TypeScript，跟随应用一起编译
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+  // 本项目是 CommonJS：package.json 无 "type" 字段，tsconfig 为 module=nodenext
+  moduleFormat = "cjs"
+}
+
+// Prisma 7 起 datasource 不再接受 url：
+//   · 迁移用的连接串 -> prisma7.config.ts
+//   · 运行时连接     -> 构造 PrismaClient 时传入 driver adapter
+datasource db {
+  provider     = "mysql"
+  relationMode = "prisma"
+}
+
+// ============================================================================
+//  第 1 批 · 系统权限域（6 张表）
+// ============================================================================
+
+// 管理员
+model SysAdmin {
+  id       BigInt  @id @default(autoincrement()) @db.UnsignedBigInt
+  username String  @db.VarChar(32)
+  // BCrypt 密文，实际 60 字符，预留算法升级空间
+  password String  @db.VarChar(100)
+  nickname String  @db.VarChar(32)
+  avatar   String? @db.VarChar(255)
+  email    String? @db.VarChar(64)
+  phone    String? @db.VarChar(20)
+
+  // 1 启用 / 0 禁用
+  status Int @default(1) @db.UnsignedTinyInt
+  // 1 = 内置超管，禁止删除与禁用
+  isBuiltin Int @default(0) @db.UnsignedTinyInt @map("is_builtin")
+
+  lastLoginAt DateTime? @db.DateTime(0) @map("last_login_at")
+  lastLoginIp String?   @db.VarChar(45) @map("last_login_ip")
+  remark      String?   @db.VarChar(255)
+  // 改密时间，支撑"90 天强制改密"策略
+  pwdUpdatedAt DateTime? @db.DateTime(0) @map("pwd_updated_at")
+
+  createdBy BigInt? @db.UnsignedBigInt @map("created_by")
+
+  createdAt DateTime  @default(now()) @db.DateTime(0) @map("created_at")
+  updatedAt DateTime  @updatedAt @db.DateTime(0) @map("updated_at")
+  deletedAt DateTime? @db.DateTime(0) @map("deleted_at")
+
+  roles SysAdminRole[]
+
+  @@unique([username, deletedAt], map: "uk_username")
+  @@index([status], map: "idx_status")
+  @@index([deletedAt], map: "idx_deleted_at")
+  @@map("sys_admin")
+}
+
+// 角色
+model SysRole {
+  id   BigInt @id @default(autoincrement()) @db.UnsignedBigInt
+  name String @db.VarChar(32)
+  // SUPER_ADMIN / OPERATOR / DATA_ADMIN
+  code        String  @db.VarChar(64)
+  description String? @db.VarChar(255)
+  // 数据范围：1 全部（预留 2 仅本人）
+  dataScope Int @default(1) @db.UnsignedTinyInt @map("data_scope")
+  // 1 = 内置角色，禁止删除，code 不可改
+  isBuiltin Int @default(0) @db.UnsignedTinyInt @map("is_builtin")
+  sort      Int @default(0)
+
+  status Int @default(1) @db.UnsignedTinyInt
+
+  createdAt DateTime  @default(now()) @db.DateTime(0) @map("created_at")
+  updatedAt DateTime  @updatedAt @db.DateTime(0) @map("updated_at")
+  deletedAt DateTime? @db.DateTime(0) @map("deleted_at")
+
+  admins      SysAdminRole[]
+  permissions SysRolePermission[]
+
+  @@unique([code, deletedAt], map: "uk_code")
+  @@index([status], map: "idx_status")
+  @@map("sys_role")
+}
+
+// 权限（目录 / 菜单 / 按钮 / 接口 四种类型统一建模在一棵树里）
+//   type=1 目录 DIR     仅菜单分组，不参与鉴权
+//   type=2 菜单 MENU    对应前端路由页面 → 页面级权限
+//   type=3 按钮 BUTTON  前端 v-permission 显隐 + 后端 @RequirePermission 鉴权
+//   type=4 接口 API     无对应按钮的纯接口权限（如导出、上传）
+model SysPermission {
+  id BigInt @id @default(autoincrement()) @db.UnsignedBigInt
+  // 父权限 id，0 为根。刻意不建外键，由应用层维护
+  parentId BigInt @default(0) @db.UnsignedBigInt @map("parent_id")
+  name     String @db.VarChar(32)
+
+  type Int @db.UnsignedTinyInt
+
+  // 权限标识，格式 模块:资源:动作，如 product:spu:create；目录为空
+  code String? @unique(map: "uk_code") @db.VarChar(128)
+
+  routePath String? @db.VarChar(128) @map("route_path")
+  routeName String? @db.VarChar(64) @map("route_name")
+  component String? @db.VarChar(128)
+  icon      String? @db.VarChar(64)
+  sort      Int     @default(0)
+
+  visible   Int @default(1) @db.UnsignedTinyInt
+  keepAlive Int @default(0) @db.UnsignedTinyInt @map("keep_alive")
+  status    Int @default(1) @db.UnsignedTinyInt
+
+  // 仅 type=4 使用
+  httpMethod String? @db.VarChar(10) @map("http_method")
+  apiPath    String? @db.VarChar(191) @map("api_path")
+
+  createdAt DateTime @default(now()) @db.DateTime(0) @map("created_at")
+  updatedAt DateTime @updatedAt @db.DateTime(0) @map("updated_at")
+
+  roleLinks SysRolePermission[]
+
+  @@index([parentId], map: "idx_parent_id")
+  @@index([type, status], map: "idx_type_status")
+  @@map("sys_permission")
+}
+
+// 管理员 - 角色（多对多）
+model SysAdminRole {
+  id      BigInt @id @default(autoincrement()) @db.UnsignedBigInt
+  adminId BigInt @db.UnsignedBigInt @map("admin_id")
+  roleId  BigInt @db.UnsignedBigInt @map("role_id")
+
+  createdAt DateTime @default(now()) @db.DateTime(0) @map("created_at")
+
+  admin SysAdmin @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  role  SysRole  @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([adminId, roleId], map: "uk_admin_role")
+  @@index([roleId], map: "idx_role_id")
+  @@map("sys_admin_role")
+}
+
+// 角色 - 权限（多对多）
+model SysRolePermission {
+  id           BigInt @id @default(autoincrement()) @db.UnsignedBigInt
+  roleId       BigInt @db.UnsignedBigInt @map("role_id")
+  permissionId BigInt @db.UnsignedBigInt @map("permission_id")
+
+  createdAt DateTime @default(now()) @db.DateTime(0) @map("created_at")
+
+  role       SysRole       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission SysPermission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId], map: "uk_role_permission")
+  @@index([permissionId], map: "idx_permission_id")
+  @@map("sys_role_permission")
+}
+
+// 操作日志（登录审计与业务操作审计合一）
+// 只增不改不删；高写入低频读，按月归档
+model SysOperationLog {
+  id BigInt @id @default(autoincrement()) @db.UnsignedBigInt
+
+  // 1 业务操作 / 2 登录认证
+  type Int @default(1) @db.UnsignedTinyInt
+
+  // 登录失败时可能为空
+  adminId BigInt? @db.UnsignedBigInt @map("admin_id")
+  // 操作人账号快照：账号被删后仍可追溯
+  username String? @db.VarChar(32)
+
+  module         String? @db.VarChar(32)
+  action         String? @db.VarChar(64)
+  permissionCode String? @db.VarChar(128) @map("permission_code")
+  httpMethod     String? @db.VarChar(10) @map("http_method")
+  apiPath        String? @db.VarChar(191) @map("api_path")
+
+  // 请求参数（入库前已脱敏：password / token 等替换为 ***）
+  requestParams Json? @map("request_params")
+
+  // 1 成功 / 0 失败
+  status     Int     @default(1) @db.UnsignedTinyInt
+  httpStatus Int?    @map("http_status")
+  errorMsg   String? @db.VarChar(500) @map("error_msg")
+  durationMs Int?    @map("duration_ms")
+
+  ip        String? @db.VarChar(45)
+  userAgent String? @db.VarChar(255) @map("user_agent")
+
+  createdAt DateTime @default(now()) @db.DateTime(3) @map("created_at")
+
+  @@index([adminId], map: "idx_admin_id")
+  @@index([createdAt], map: "idx_created_at")
+  @@index([type, createdAt], map: "idx_type_created")
+  @@index([module], map: "idx_module")
+  @@map("sys_operation_log")
+}

@@ -1,0 +1,17 @@
+# 这些文件不参与 Prettier 格式化
+node_modules/
+dist/
+build/
+coverage/
+.pnpm-store/
+*.min.js
+*.min.css
+
+# Prisma 生成的客户端代码
+apps/server/src/generated/
+
+# Prisma 的迁移 SQL 是引擎生成的，格式固定，不该被重排
+apps/server/prisma/migrations/
+
+# 锁文件由包管理器维护
+pnpm-lock.yaml

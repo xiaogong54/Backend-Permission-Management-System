@@ -1,12 +1,31 @@
 # ==========================================================================
-#  pnpm workspace 成员声明
-#  这个文件的存在，让 apps/* 与 packages/* 成为「同一个工作区的包」。
-#  效果：
-#    1. 根目录一次 pnpm install，所有成员包的依赖统一安装在根 node_modules
-#    2. 成员包之间互相 import 时，pnpm 建立软链接指向本地源码，
-#       而不是去 npm registry 下载 —— 改 shared 的代码，前后端立刻生效
-#    3. 支持 pnpm -r（recursive）在全部成员包上批量执行脚本
+#  pnpm workspace 配置
+# --------------------------------------------------------------------------
+#  packages：声明哪些目录是工作区成员
+#    效果 1：根目录一次 pnpm install，所有成员依赖统一装在根 node_modules
+#    效果 2：成员之间互相 import 时，pnpm 建软链接指向本地源码，
+#            而不是去 registry 下载 —— 改 shared 的代码，前后端立刻生效
+#    效果 3：支持 pnpm -r 在全部成员上批量执行脚本
 # ==========================================================================
 packages:
-  - 'apps/*'
-  - 'packages/*'
+  - "apps/*"
+  - "packages/*"
+
+# ==========================================================================
+#  pnpm 10 起，这些设置从 package.json 的 "pnpm" 字段搬到了本文件。
+#
+#  onlyBuiltDependencies：允许执行安装脚本的依赖白名单。
+#  pnpm 10 默认禁止所有依赖跑 postinstall（供应链安全），
+#  但下面这些必须放行，否则装出来的包是残缺的：
+#    · @prisma/engines / prisma —— postinstall 负责下载迁移用的引擎二进制
+#    · esbuild                  —— postinstall 安装平台对应的原生二进制
+#    · vue-demi                 —— postinstall 根据 Vue 版本切换入口（Pinia 依赖它）
+#
+#  刻意不放行的：
+#    · @scarf/scarf —— 纯遥测上报，放行反而是隐私负担
+# ==========================================================================
+onlyBuiltDependencies:
+  - "@prisma/engines"
+  - prisma
+  - esbuild
+  - vue-demi
