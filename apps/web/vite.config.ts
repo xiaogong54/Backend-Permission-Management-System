@@ -49,6 +49,14 @@ export default defineConfig(({ mode }) => {
           target: apiTarget,
           changeOrigin: true,
         },
+        // 健康检查不在 /api 前缀下（后端 setGlobalPrefix 时把它排除掉了，
+        // 方便容器编排的探针直接访问，不必知道 API 版本号）。
+        // 所以必须单独加一条转发规则 —— 否则浏览器请求 /health 会落到
+        // Vite 的 SPA 兜底上，拿回一个 index.html 而不是 JSON。
+        '/health': {
+          target: apiTarget,
+          changeOrigin: true,
+        },
       },
     },
 
